@@ -188,6 +188,7 @@ function formatFinalNotification(summary) {
         already_renewed: 'ℹ️ KataBump 已续期或无需重复续期',
         captcha_required: '⚠️ KataBump 续期验证码阻断',
         login_failed: '❌ KataBump 登录失败',
+        server_entry_not_ready: '❌ KataBump 服务器入口/Renew 按钮未就绪',
         no_proxy_available: '❌ KataBump 无可用代理',
         proxy_exhausted: '❌ KataBump 代理已耗尽',
         proxy_retry: '❌ KataBump 代理重试失败',

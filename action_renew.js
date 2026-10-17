@@ -16,6 +16,7 @@ const {
     safeAccountLabel,
     finalizeAccountResources
 } = require('./lib/runtime_helpers');
+const { renewButton, classifyMissingRenew, resolveServerEntry } = require('./lib/server_entry');
 const { sendTelegramNotification } = require('./lib/telegram');
 
 const MANAGED_BY_PROXY_RUNNER = process.env.KATABUMP_MANAGED_BY_PROXY_RUNNER === '1';
@@ -1697,7 +1698,10 @@ function getUserExitCode(runStatus) {
             return EXIT_CODE.RENEW_CAPTCHA_FAILED;
         case 'error':
             return EXIT_CODE.FATAL;
+        case 'server_entry_not_ready':
+            return EXIT_CODE.FATAL;
         default:
+            console.error('   >> ⚠️ 未识别的账号状态: ' + runStatus + '，按 FATAL 处理');
             return EXIT_CODE.FATAL;
     }
 }
@@ -1713,9 +1717,11 @@ function selectDecisionAccount(accounts, exitCode) {
         [EXIT_CODE.FATAL]: 'error'
     };
     const preferredStatus = statusByCode[exitCode];
+    // FATAL 现在对应两个 status 字符串（'error' 与 'server_entry_not_ready'），任一命中即可作为决策账号
+    const wanted = preferredStatus === 'error' ? ['error', 'server_entry_not_ready'] : [preferredStatus];
     if (preferredStatus) {
         for (let i = accounts.length - 1; i >= 0; i--) {
-            if (accounts[i].status === preferredStatus) return accounts[i];
+            if (wanted.includes(accounts[i].status)) return accounts[i];
         }
     }
     return accounts.length > 0 ? accounts[accounts.length - 1] : null;
@@ -2108,32 +2114,18 @@ async function runMain() {
                 // Dashboard 的服务器列表由 /api-client/list-servers 异步填充。
                 // 必须等待实际的服务器入口出现并点击 See，Renew 只存在于详情页。
                 if (!stopCurrentUser && !shouldStopAllUsers) {
-                    try {
-                        const seeBtn = page.locator('a[href*="/servers/edit?id="]').first();
-                        try {
-                            await seeBtn.waitFor({ state: 'visible', timeout: 20000 });
-                        } catch (firstError) {
-                            console.warn(`[登录] See 入口尚未出现，刷新 Dashboard 后重试: ${firstError.message}`);
-                            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-                            await seeBtn.waitFor({ state: 'visible', timeout: 20000 });
+                    const entry = await resolveServerEntry(page);
+                    if (!entry.ready) {
+                        // 账号下确实没有服务器 → not_ready（业务非错误）；其余识别失败 → FATAL 但带原因
+                        if (entry.status === 'not_ready') {
+                            console.log(`[登录] ${entry.reason}`);
+                        } else {
+                            console.error(`[登录] See 或服务器详情页未就绪: ${entry.reason} (URL: ${page.url()})`);
                         }
-
-                        const seeHref = await seeBtn.getAttribute('href');
-                        console.log(`[登录] 服务器入口已加载: ${seeHref || 'unknown'}`);
-                        await Promise.all([
-                            page.waitForURL(url => /\/servers\/edit\?id=/i.test(url), { timeout: 15000 }),
-                            seeBtn.click()
-                        ]);
-                        console.log(`[登录] 已点击 See 按钮，当前 URL: ${page.url()}`);
-
-                        const renewBtn = page.getByRole('button', { name: 'Renew', exact: true }).first();
-                        await renewBtn.waitFor({ state: 'visible', timeout: 15000 });
-                        console.log('[登录] 已进入服务器详情页，Renew 按钮已出现。');
-                    } catch (e) {
-                        console.error(`[登录] See 或服务器详情页未就绪: ${e.message} (URL: ${page.url()})`);
-                        runStatus = 'error';
-                        blockMessage = `Server See entry or Renew button did not appear after login: ${e.message}`;
-                        await dumpDebugSnapshot(page, `server_entry_not_ready_${accountLabel}`);
+                        runStatus = entry.status;
+                        blockMessage = entry.reason;
+                        renewSuccess = false;
+                        await dumpDebugSnapshot(page, `${entry.status === 'not_ready' ? 'no_servers' : 'server_entry_not_ready'}_${accountLabel}`);
                         stopCurrentUser = true;
                     }
                 }
@@ -2142,12 +2134,20 @@ async function runMain() {
             // 3. Renew 主循环
             if (!stopCurrentUser && !shouldStopAllUsers) {
                 for (let attempt = 1; attempt <= 20; attempt++) {
-                    const renewBtn = page.getByRole('button', { name: 'Renew', exact: true }).first();
+                    const renewBtn = renewButton(page);
 
                     try { await renewBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) { }
 
                     if (!(await renewBtn.isVisible().catch(() => false))) {
                         console.log('未找到 Renew 按钮 (可能已结束)。');
+                        // 只在本轮还没有结论时补状态，否则不覆盖前面已判定的成功/已续期；
+                        // 显式终态取代 runStatus 停在 'unknown' 被出口守卫翻成无原因 FATAL。
+                        if (runStatus === 'unknown') {
+                            const missing = await classifyMissingRenew(page);
+                            runStatus = missing.status;
+                            blockMessage = missing.reason;
+                            await dumpDebugSnapshot(page, `${missing.status}_${accountLabel}`);
+                        }
                         break;
                     }
 
@@ -2609,7 +2609,7 @@ async function runMain() {
             notificationMessage = `❌ KataBump 登录失败\n用户: ${displayAccount}\n原因: ${blockMessage}`;
         } else if (runStatus === 'already_renewed') {
             notificationMessage = `ℹ️ KataBump 可能已续期\n用户: ${displayAccount}\nExpiry 未变化，可能本轮已是最新。`;
-        } else if (runStatus === 'error') {
+        } else if (runStatus === 'error' || runStatus === 'server_entry_not_ready') {
             notificationMessage = `❌ KataBump 错误\n用户: ${displayAccount}\n原因: ${blockMessage}`;
         }
         if (notificationMessage) {
@@ -2630,7 +2630,7 @@ async function runMain() {
         const userExitCode = getUserExitCode(runStatus);
         overallExitCode = mergeExitCode(overallExitCode, userExitCode);
 
-        if (runStatus === 'error') {
+        if (runStatus === 'error' || runStatus === 'server_entry_not_ready') {
             shouldStopAllUsers = true;
         }
 
