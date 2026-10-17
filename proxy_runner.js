@@ -10,6 +10,7 @@ const {
     runChildWithTimeout,
     DEFAULT_GRACEFUL_TERMINATION_MS
 } = require('./lib/runtime_helpers');
+const { EXIT_CODE, SUCCESS_STATUSES, OK_STATUSES, STATUS_TITLES } = require('./lib/statuses');
 const { sendTelegramNotification } = require('./lib/telegram');
 
 const ACTION_TIMEOUT_MINUTES = normalizeTimeoutMinutes(process.env.ACTION_TIMEOUT_MINUTES);
@@ -40,18 +41,6 @@ const MAX_RENEW_CAPTCHA_RETRIES = Math.floor(parseNonNegativeNumber(
     1
 ));
 
-// --- 退出码（与 action_renew.js 完全一致） ---
-const EXIT_CODE = {
-    SUCCESS: 0,
-    FATAL: 1,
-    PROXY_RETRY: 42,       // 只有这个码才触发代理轮换
-    RENEW_CAPTCHA_FAILED: 43, // Renew ALTCHA 失败：同代理重试后可切换代理
-    NOT_READY: 3,
-    ALREADY_RENEWED: 4,
-    LOGIN_FAILED: 5,
-    NO_PROXY_AVAILABLE: 6 // 全部代理冷却，暂无可用代理
-};
-
 // --- 只有明确成功/不可重试状态才停止轮换 ---
 const NON_RETRYABLE = new Set([
     EXIT_CODE.SUCCESS,
@@ -60,22 +49,6 @@ const NON_RETRYABLE = new Set([
     EXIT_CODE.LOGIN_FAILED,
     EXIT_CODE.RENEW_CAPTCHA_FAILED
 ]);
-
-const SUCCESS_STATUSES = ['success', 'already_renewed'];
-const OK_STATUSES = [...SUCCESS_STATUSES, 'not_ready', 'no_servers'];
-const STATUS_TITLES = {
-    success: '✅ KataBump 自动续期完成',
-    not_ready: '⏳ KataBump 本轮暂不可续期',
-    no_servers: '⚠️ KataBump 账号下没有服务器（可能已全部删除或停用）',
-    already_renewed: 'ℹ️ KataBump 已续期或无需重复续期',
-    captcha_required: '⚠️ KataBump 续期验证码阻断',
-    login_failed: '❌ KataBump 登录失败',
-    server_entry_not_ready: '❌ KataBump 服务器入口/Renew 按钮未就绪',
-    no_proxy_available: '❌ KataBump 无可用代理',
-    proxy_exhausted: '❌ KataBump 代理已耗尽',
-    proxy_retry: '❌ KataBump 代理重试失败',
-    error: '❌ KataBump 自动续期失败'
-};
 
 const CONFIG = {
     MAX_PROXY_SWITCHES: CONFIGURED_MAX_PROXY_SWITCHES,
@@ -837,8 +810,6 @@ module.exports = {
     makeAttemptRecord,
     buildFinalSummary,
     formatFinalNotification,
-    OK_STATUSES,
-    STATUS_TITLES,
     normalizeTimeoutMinutes,
     runChildWithTimeout,
     ACTION_TIMEOUT_MINUTES,

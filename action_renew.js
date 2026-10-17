@@ -17,21 +17,11 @@ const {
     finalizeAccountResources
 } = require('./lib/runtime_helpers');
 const { renewButton, classifyMissingRenew, resolveServerEntry } = require('./lib/server_entry');
+const { EXIT_CODE, STATUSES_BY_EXIT_CODE } = require('./lib/statuses');
 const { sendTelegramNotification } = require('./lib/telegram');
 
 const MANAGED_BY_PROXY_RUNNER = process.env.KATABUMP_MANAGED_BY_PROXY_RUNNER === '1';
 const RESULT_FILE = process.env.KATABUMP_RESULT_FILE || '';
-
-// --- 退出码（供外层 proxy_runner.js 使用） ---
-const EXIT_CODE = {
-    SUCCESS: 0,
-    FATAL: 1,
-    PROXY_RETRY: 42,      // Turnstile 3次仍失败 → 外层换代理，不与其他退出码冲突
-    RENEW_CAPTCHA_FAILED: 43, // Renew ALTCHA 失败，不换代理但也不返回成功
-    NOT_READY: 3,         // 还没到续期窗口
-    ALREADY_RENEWED: 4,   // Expiry 未变化，本轮已是最新
-    LOGIN_FAILED: 5       // 账号或密码错误
-};
 
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
@@ -1709,23 +1699,11 @@ function getUserExitCode(runStatus) {
 }
 
 function selectDecisionAccount(accounts, exitCode) {
-    const statusByCode = {
-        [EXIT_CODE.SUCCESS]: 'success',
-        [EXIT_CODE.NOT_READY]: 'not_ready',
-        [EXIT_CODE.ALREADY_RENEWED]: 'already_renewed',
-        [EXIT_CODE.LOGIN_FAILED]: 'login_failed',
-        [EXIT_CODE.RENEW_CAPTCHA_FAILED]: 'captcha_required',
-        [EXIT_CODE.PROXY_RETRY]: 'login_captcha_required',
-        [EXIT_CODE.FATAL]: 'error'
-    };
-    // 一个退出码可能对应多个 status 名（FATAL→error/server_entry_not_ready，NOT_READY→not_ready/no_servers）
-    const wanted = {
-        [EXIT_CODE.FATAL]: ['error', 'server_entry_not_ready'],
-        [EXIT_CODE.NOT_READY]: ['not_ready', 'no_servers']
-    };
-    const candidates = wanted[exitCode] || [statusByCode[exitCode]];
-    for (let i = accounts.length - 1; i >= 0; i--) {
-        if (candidates.includes(accounts[i].status)) return accounts[i];
+    const candidates = STATUSES_BY_EXIT_CODE[exitCode];
+    if (candidates) {
+        for (let i = accounts.length - 1; i >= 0; i--) {
+            if (candidates.includes(accounts[i].status)) return accounts[i];
+        }
     }
     return accounts.length > 0 ? accounts[accounts.length - 1] : null;
 }

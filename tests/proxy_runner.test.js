@@ -2,6 +2,7 @@ const assert = require('assert');
 const { execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { EXIT_CODE, EXIT_CODE_PRIORITY, SUCCESS_STATUSES, OK_STATUSES, STATUS_TITLES, STATUSES_BY_EXIT_CODE } = require('../lib/statuses');
 
 function runCheck() {
     execFileSync(process.execPath, ['--check', '../proxy_runner.js'], { cwd: __dirname, stdio: 'pipe' });
@@ -30,14 +31,20 @@ function tests() {
     assert.strictEqual(typeof mod.proxyKey, 'function');
     assert.strictEqual(typeof mod.safeProxyId, 'function');
 
-    // 状态词表的 4 个 owner：lib/server_entry.js 可能返回的每个终态都必须在 titles 与 OK 列表里登记，
+    // 状态词表 owner 的自洽性：退出码必须在严重度表里，每个终态都必须在 titles 里有 key，
     // 否则会出现“exit code 是 0 但统计计为失败”的矛盾。
-    for (const status of ['success', 'not_ready', 'no_servers', 'already_renewed', 'server_entry_not_ready', 'error']) {
-        assert.ok(mod.STATUS_TITLES[status], `STATUS_TITLES 缺少终态: ${status}`);
+    for (const [name, code] of Object.entries(EXIT_CODE)) {
+        assert.ok(EXIT_CODE_PRIORITY.includes(code), `EXIT_CODE_PRIORITY 缺少 ${name}`);
     }
-    assert.ok(mod.OK_STATUSES.includes('no_servers'), 'OK_STATUSES 缺少 no_servers');
-    assert.ok(mod.OK_STATUSES.includes('not_ready'), 'OK_STATUSES 缺少 not_ready');
-    assert.ok(!mod.OK_STATUSES.includes('server_entry_not_ready'), 'server_entry_not_ready 不该算 OK');
+    for (const [code, statuses] of Object.entries(STATUSES_BY_EXIT_CODE)) {
+        for (const status of statuses) {
+            assert.ok(STATUS_TITLES[status], `STATUS_TITLES 缺少终态: ${status} (exit ${code})`);
+        }
+    }
+    assert.ok(OK_STATUSES.includes('no_servers'), 'OK_STATUSES 缺少 no_servers');
+    assert.ok(OK_STATUSES.includes('not_ready'), 'OK_STATUSES 缺少 not_ready');
+    assert.ok(!OK_STATUSES.includes('server_entry_not_ready'), 'server_entry_not_ready 不该算 OK');
+    for (const status of SUCCESS_STATUSES) assert.ok(OK_STATUSES.includes(status), `SUCCESS_STATUSES 的 ${status} 不在 OK_STATUSES`);
 
     const samples = [
         {

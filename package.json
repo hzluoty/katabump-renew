@@ -5,7 +5,7 @@
     "main": "proxy_runner.js",
     "scripts": {
         "start": "node proxy_runner.js",
-        "check": "node --check action_renew.js && node --check proxy_runner.js && node --check lib/runtime_helpers.js && node --check lib/telegram.js && node --check lib/server_entry.js && node tests/proxy_runner.test.js && node tests/runtime_helpers.test.js && node tests/server_entry.test.js",
+        "check": "node --check action_renew.js && node --check proxy_runner.js && node --check lib/runtime_helpers.js && node --check lib/telegram.js && node --check lib/server_entry.js && node --check lib/statuses.js && node tests/proxy_runner.test.js && node tests/runtime_helpers.test.js && node tests/server_entry.test.js",
         "test": "node tests/proxy_runner.test.js && node tests/runtime_helpers.test.js && node tests/server_entry.test.js"
     },
     "dependencies": {

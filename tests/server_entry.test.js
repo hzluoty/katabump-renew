@@ -1,6 +1,6 @@
 const assert = require('assert');
 const { classifyMissingRenew, resolveServerEntry } = require('../lib/server_entry');
-const { OK_STATUSES, STATUS_TITLES } = require('../proxy_runner');
+const { OK_STATUSES, STATUS_TITLES } = require('../lib/statuses');
 
 function stubPage({ entries = 0, text = '', renewVisible = false, countThrows = false } = {}) {
     const seeLocator = {
