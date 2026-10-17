@@ -1688,6 +1688,8 @@ function getUserExitCode(runStatus) {
             return EXIT_CODE.SUCCESS;
         case 'not_ready':
             return EXIT_CODE.NOT_READY;
+        case 'no_servers':
+            return EXIT_CODE.NOT_READY;
         case 'already_renewed':
             return EXIT_CODE.ALREADY_RENEWED;
         case 'login_failed':
@@ -1716,13 +1718,14 @@ function selectDecisionAccount(accounts, exitCode) {
         [EXIT_CODE.PROXY_RETRY]: 'login_captcha_required',
         [EXIT_CODE.FATAL]: 'error'
     };
-    const preferredStatus = statusByCode[exitCode];
-    // FATAL 现在对应两个 status 字符串（'error' 与 'server_entry_not_ready'），任一命中即可作为决策账号
-    const wanted = preferredStatus === 'error' ? ['error', 'server_entry_not_ready'] : [preferredStatus];
-    if (preferredStatus) {
-        for (let i = accounts.length - 1; i >= 0; i--) {
-            if (wanted.includes(accounts[i].status)) return accounts[i];
-        }
+    // 一个退出码可能对应多个 status 名（FATAL→error/server_entry_not_ready，NOT_READY→not_ready/no_servers）
+    const wanted = {
+        [EXIT_CODE.FATAL]: ['error', 'server_entry_not_ready'],
+        [EXIT_CODE.NOT_READY]: ['not_ready', 'no_servers']
+    };
+    const candidates = wanted[exitCode] || [statusByCode[exitCode]];
+    for (let i = accounts.length - 1; i >= 0; i--) {
+        if (candidates.includes(accounts[i].status)) return accounts[i];
     }
     return accounts.length > 0 ? accounts[accounts.length - 1] : null;
 }
@@ -2116,8 +2119,8 @@ async function runMain() {
                 if (!stopCurrentUser && !shouldStopAllUsers) {
                     const entry = await resolveServerEntry(page);
                     if (!entry.ready) {
-                        // 账号下确实没有服务器 → not_ready（业务非错误）；其余识别失败 → FATAL 但带原因
-                        if (entry.status === 'not_ready') {
+                        // 账号下确实没有服务器 → no_servers（不会自愈）；其余识别失败 → FATAL 但带原因
+                        if (entry.status === 'no_servers') {
                             console.log(`[登录] ${entry.reason}`);
                         } else {
                             console.error(`[登录] See 或服务器详情页未就绪: ${entry.reason} (URL: ${page.url()})`);
@@ -2125,7 +2128,7 @@ async function runMain() {
                         runStatus = entry.status;
                         blockMessage = entry.reason;
                         renewSuccess = false;
-                        await dumpDebugSnapshot(page, `${entry.status === 'not_ready' ? 'no_servers' : 'server_entry_not_ready'}_${accountLabel}`);
+                        await dumpDebugSnapshot(page, `${entry.status}_${accountLabel}`);
                         stopCurrentUser = true;
                     }
                 }
@@ -2601,6 +2604,9 @@ async function runMain() {
             notificationMessage = `✅ KataBump 续期完成\n用户: ${displayAccount}\n状态: 续期成功`;
         } else if (runStatus === 'not_ready') {
             notificationMessage = `⏳ KataBump 本轮未续期\n用户: ${displayAccount}\n原因: ${blockMessage}\nCron 将在下次继续检查。`;
+        } else if (runStatus === 'no_servers') {
+            // 不承诺“下次继续检查”：账号下没有服务器时 cron 再跑多少次结果都一样
+            notificationMessage = `⚠️ KataBump 账号下没有服务器\n用户: ${displayAccount}\n原因: ${blockMessage}\n如需继续自动续期，请先在该账号下重新购买/恢复服务器。`;
         } else if (runStatus === 'captcha_required') {
             notificationMessage = `⚠️ KataBump 验证码阻断\n用户: ${displayAccount}\n原因: ${blockMessage}\n请检查验证码状态。`;
         } else if (runStatus === 'login_captcha_required') {

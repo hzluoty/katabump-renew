@@ -36,12 +36,12 @@ async function tests() {
     assert.strictEqual(readyResult.status, 'ready');
     assert.strictEqual(ready.reloaded, 0);
 
-    // 账号下没有服务器 → not_ready（非错误终态），且不需要刷新重试
+    // 账号下没有服务器 → no_servers（不会自愈，与“窗口未开”的 not_ready 分开），且不需要刷新重试
     // 文案取自真实快照：actions/runs/39000012720 → login_after_submit_*.html
     const empty = stubPage({ entries: 0, text: 'Your servers 0\nServers You not have servers.' });
     const emptyResult = await resolveServerEntry(empty, { waitMs: 1, renewWaitMs: 1 });
     assert.strictEqual(emptyResult.ready, false);
-    assert.strictEqual(emptyResult.status, 'not_ready');
+    assert.strictEqual(emptyResult.status, 'no_servers');
     assert.strictEqual(empty.reloaded, 0);
 
     // 有服务器但 Renew 始终不出现 → 刷新一次后仍是识别失败（保持 FATAL）

@@ -30,6 +30,15 @@ function tests() {
     assert.strictEqual(typeof mod.proxyKey, 'function');
     assert.strictEqual(typeof mod.safeProxyId, 'function');
 
+    // 状态词表的 4 个 owner：lib/server_entry.js 可能返回的每个终态都必须在 titles 与 OK 列表里登记，
+    // 否则会出现“exit code 是 0 但统计计为失败”的矛盾。
+    for (const status of ['success', 'not_ready', 'no_servers', 'already_renewed', 'server_entry_not_ready', 'error']) {
+        assert.ok(mod.STATUS_TITLES[status], `STATUS_TITLES 缺少终态: ${status}`);
+    }
+    assert.ok(mod.OK_STATUSES.includes('no_servers'), 'OK_STATUSES 缺少 no_servers');
+    assert.ok(mod.OK_STATUSES.includes('not_ready'), 'OK_STATUSES 缺少 not_ready');
+    assert.ok(!mod.OK_STATUSES.includes('server_entry_not_ready'), 'server_entry_not_ready 不该算 OK');
+
     const samples = [
         {
             line: '1.2.3.4:8080:user:password',

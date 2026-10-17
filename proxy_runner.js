@@ -61,6 +61,22 @@ const NON_RETRYABLE = new Set([
     EXIT_CODE.RENEW_CAPTCHA_FAILED
 ]);
 
+const SUCCESS_STATUSES = ['success', 'already_renewed'];
+const OK_STATUSES = [...SUCCESS_STATUSES, 'not_ready', 'no_servers'];
+const STATUS_TITLES = {
+    success: '✅ KataBump 自动续期完成',
+    not_ready: '⏳ KataBump 本轮暂不可续期',
+    no_servers: '⚠️ KataBump 账号下没有服务器（可能已全部删除或停用）',
+    already_renewed: 'ℹ️ KataBump 已续期或无需重复续期',
+    captcha_required: '⚠️ KataBump 续期验证码阻断',
+    login_failed: '❌ KataBump 登录失败',
+    server_entry_not_ready: '❌ KataBump 服务器入口/Renew 按钮未就绪',
+    no_proxy_available: '❌ KataBump 无可用代理',
+    proxy_exhausted: '❌ KataBump 代理已耗尽',
+    proxy_retry: '❌ KataBump 代理重试失败',
+    error: '❌ KataBump 自动续期失败'
+};
+
 const CONFIG = {
     MAX_PROXY_SWITCHES: CONFIGURED_MAX_PROXY_SWITCHES,
     COOLDOWN_FILE: path.join(process.cwd(), 'proxy-cooldown.json'),
@@ -154,9 +170,9 @@ function buildFinalSummary(finalCode, finalResult, attempts, maxAttempts = attem
 
     const accounts = Array.isArray(actionResult.accounts) ? actionResult.accounts : [];
     const counts = {
-        success: accounts.filter(account => ['success', 'already_renewed'].includes(account.status)).length,
-        notReady: accounts.filter(account => account.status === 'not_ready').length,
-        failed: accounts.filter(account => !['success', 'not_ready', 'already_renewed'].includes(account.status)).length
+        success: accounts.filter(account => SUCCESS_STATUSES.includes(account.status)).length,
+        notReady: accounts.filter(account => OK_STATUSES.includes(account.status) && !SUCCESS_STATUSES.includes(account.status)).length,
+        failed: accounts.filter(account => !OK_STATUSES.includes(account.status)).length
     };
     if (counts.success === 0 && counts.notReady === 0 && counts.failed === 0 && accounts.length === 0) {
         counts.failed = 0;
@@ -173,7 +189,7 @@ function buildFinalSummary(finalCode, finalResult, attempts, maxAttempts = attem
         proxyAttempts,
         directFallbackAttempted,
         directFallbackSucceeded: directFallbackRecord
-            ? ['success', 'not_ready', 'already_renewed'].includes(directFallbackRecord.status)
+            ? OK_STATUSES.includes(directFallbackRecord.status)
             : false,
         totalAttempts: attempts.length,
         accounts,
@@ -182,20 +198,8 @@ function buildFinalSummary(finalCode, finalResult, attempts, maxAttempts = attem
 }
 
 function formatFinalNotification(summary) {
-    const titles = {
-        success: '✅ KataBump 自动续期完成',
-        not_ready: '⏳ KataBump 本轮暂不可续期',
-        already_renewed: 'ℹ️ KataBump 已续期或无需重复续期',
-        captcha_required: '⚠️ KataBump 续期验证码阻断',
-        login_failed: '❌ KataBump 登录失败',
-        server_entry_not_ready: '❌ KataBump 服务器入口/Renew 按钮未就绪',
-        no_proxy_available: '❌ KataBump 无可用代理',
-        proxy_exhausted: '❌ KataBump 代理已耗尽',
-        proxy_retry: '❌ KataBump 代理重试失败',
-        error: '❌ KataBump 自动续期失败'
-    };
     const lines = [
-        titles[summary.status] || titles.error,
+        STATUS_TITLES[summary.status] || STATUS_TITLES.error,
         '',
         `代理尝试：${summary.proxyAttempts}/${summary.maxAttempts}`
     ];
@@ -831,6 +835,8 @@ module.exports = {
     makeAttemptRecord,
     buildFinalSummary,
     formatFinalNotification,
+    OK_STATUSES,
+    STATUS_TITLES,
     normalizeTimeoutMinutes,
     runChildWithTimeout,
     ACTION_TIMEOUT_MINUTES,
