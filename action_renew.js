@@ -1371,6 +1371,16 @@ function detectNotReady(text) {
     return null;
 }
 
+/** 从续期后的 URL 中提取站点返回的 renew-error 参数 */
+function getRenewErrorFromUrl(url) {
+    try {
+        const renewError = new URL(url).searchParams.get('renew-error');
+        return renewError ? renewError.replace(/\s+/g, ' ').trim() : '';
+    } catch (e) {
+        return '';
+    }
+}
+
 /** 检测验证码/checkbox 阻断
  *  只检测动态的浏览器原生校验消息，不把静态 ALTCHA 标签当阻断 */
 function detectCaptchaRequired(text) {
@@ -1421,6 +1431,31 @@ async function isAltchaCheckboxChecked(page, modal) {
     } catch (e) { }
 
     return false;
+}
+
+/** 只把实际可见的 ALTCHA 控件识别为验证码，忽略页面预加载的隐藏节点 */
+async function hasVisibleAltchaWidget(modal) {
+    const selectors = [
+        'altcha-widget',
+        '[data-altcha]',
+        '.altcha',
+        'input[type="checkbox"]',
+        'iframe[src*="altcha"]'
+    ];
+
+    for (const selector of selectors) {
+        const locator = modal.locator(selector);
+        const count = await locator.count().catch(() => 0);
+        for (let index = 0; index < count; index++) {
+            const candidate = locator.nth(index);
+            if (!(await candidate.isVisible().catch(() => false))) continue;
+            const box = await candidate.boundingBox().catch(() => null);
+            if (box && box.width > 0 && box.height > 0) return true;
+        }
+    }
+
+    const protectedLabel = modal.getByText(/Protected by ALTCHA/i).last();
+    return await protectedLabel.isVisible().catch(() => false);
 }
 
 /** 检测续期成功文本 */
@@ -1490,6 +1525,93 @@ async function readExpiryDate(page) {
         console.error(`[Expiry] 读取失败: ${e.message}`);
     }
     return null;
+}
+
+/** 等待续期验证动画完成，再判断日期变化或站点返回的业务提示 */
+async function waitForRenewOutcome(page, oldExpiry, timeoutMs = 60000) {
+    const startedAt = Date.now();
+    let lastProgress = '';
+    let nextExpiryCheckAt = 0;
+
+    while (Date.now() - startedAt < timeoutMs) {
+        if (page.isClosed()) {
+            return {
+                state: 'page_unavailable',
+                message: 'Renew page closed while waiting for verification'
+            };
+        }
+
+        let currentUrl = '';
+        try {
+            currentUrl = page.url();
+        } catch (e) { }
+
+        // 页面在 ALTCHA 验证结束时可能短暂重建执行上下文。
+        // getPageText 会吞掉这类瞬时错误，本轮继续等待下一次稳定状态。
+        const pageText = await getPageText(page);
+        const renewError = getRenewErrorFromUrl(currentUrl);
+        const combinedText = [pageText, renewError].filter(Boolean).join('\n');
+
+        const notReady = detectNotReady(combinedText);
+        if (notReady) {
+            return {
+                state: 'not_ready',
+                message: typeof notReady === 'string' ? notReady : notReady.raw
+            };
+        }
+
+        if (detectRenewSuccess(combinedText)) {
+            return { state: 'success', message: 'Renew success text detected' };
+        }
+
+        // 避免每秒重复读取和打印 Expiry；验证完成后下一轮仍会再次检查。
+        if (Date.now() >= nextExpiryCheckAt) {
+            const newExpiry = await readExpiryDate(page);
+            nextExpiryCheckAt = Date.now() + 2000;
+            if (newExpiry && oldExpiry && newExpiry !== oldExpiry) {
+                return {
+                    state: 'success',
+                    message: `Expiry changed: ${oldExpiry} -> ${newExpiry}`
+                };
+            }
+        }
+
+        const progressMatch = combinedText.match(/Verifying(?:\s*(?:\.\.\.|…))?\s*(\d{1,3})%/i);
+        if (progressMatch) {
+            const progress = `${progressMatch[1]}%`;
+            if (progress !== lastProgress) {
+                console.log(`[Renew] ALTCHA 验证进度: ${progress}`);
+                lastProgress = progress;
+            }
+        } else {
+            const captchaIssue = detectCaptchaRequired(combinedText);
+            if (captchaIssue) {
+                return { state: 'captcha_required', message: captchaIssue };
+            }
+        }
+
+        await page.waitForTimeout(1000);
+    }
+
+    return {
+        state: 'renew_timeout',
+        message: `Renew result did not settle within ${timeoutMs}ms` +
+            (lastProgress ? ` (last progress ${lastProgress})` : '')
+    };
+}
+
+/** 页面处于导航或已脱离 CDP 时，不再让 reload 异常升级成 FATAL */
+async function safeRenewReload(page, reason) {
+    if (!page || page.isClosed()) return false;
+    try {
+        await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+        if (page.isClosed()) return false;
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+        return true;
+    } catch (e) {
+        console.warn(`[Renew] ${reason}，页面当前不可刷新: ${e.message}`);
+        return false;
+    }
 }
 
 // ============================================================
@@ -1983,14 +2105,38 @@ async function runMain() {
                     }
                 }
 
-                // 如果有 See 按钮，点击它；否则认为已在 dashboard 页面
-                try {
-                    const seeBtn = page.getByRole('link', { name: 'See' }).first();
-                    if (await seeBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-                        await seeBtn.click();
-                        console.log('[登录] 已点击 See 按钮。');
+                // Dashboard 的服务器列表由 /api-client/list-servers 异步填充。
+                // 必须等待实际的服务器入口出现并点击 See，Renew 只存在于详情页。
+                if (!stopCurrentUser && !shouldStopAllUsers) {
+                    try {
+                        const seeBtn = page.locator('a[href*="/servers/edit?id="]').first();
+                        try {
+                            await seeBtn.waitFor({ state: 'visible', timeout: 20000 });
+                        } catch (firstError) {
+                            console.warn(`[登录] See 入口尚未出现，刷新 Dashboard 后重试: ${firstError.message}`);
+                            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+                            await seeBtn.waitFor({ state: 'visible', timeout: 20000 });
+                        }
+
+                        const seeHref = await seeBtn.getAttribute('href');
+                        console.log(`[登录] 服务器入口已加载: ${seeHref || 'unknown'}`);
+                        await Promise.all([
+                            page.waitForURL(url => /\/servers\/edit\?id=/i.test(url), { timeout: 15000 }),
+                            seeBtn.click()
+                        ]);
+                        console.log(`[登录] 已点击 See 按钮，当前 URL: ${page.url()}`);
+
+                        const renewBtn = page.getByRole('button', { name: 'Renew', exact: true }).first();
+                        await renewBtn.waitFor({ state: 'visible', timeout: 15000 });
+                        console.log('[登录] 已进入服务器详情页，Renew 按钮已出现。');
+                    } catch (e) {
+                        console.error(`[登录] See 或服务器详情页未就绪: ${e.message} (URL: ${page.url()})`);
+                        runStatus = 'error';
+                        blockMessage = `Server See entry or Renew button did not appear after login: ${e.message}`;
+                        await dumpDebugSnapshot(page, `server_entry_not_ready_${accountLabel}`);
+                        stopCurrentUser = true;
                     }
-                } catch (e) { }
+                }
             }
 
             // 3. Renew 主循环
@@ -2031,8 +2177,7 @@ async function runMain() {
                     // 识别弹窗验证类型：ALTCHA / CF Turnstile / 无，非 CF 时跳过
                     // 只用强特征，限定当前弹窗
                     const hasCfInModal = await modal.locator('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]').count().catch(() => 0) > 0;
-                    const hasAltchaInModal2 = /Protected by ALTCHA/i.test(modalText)
-                        || await modal.locator('altcha-widget, [data-altcha], .altcha').count().catch(() => 0) > 0;
+                    const hasAltchaInModal2 = await hasVisibleAltchaWidget(modal);
                     console.log(`[Renew阶段] 弹窗验证类型: ${hasAltchaInModal2 ? 'ALTCHA' : hasCfInModal ? 'CF Turnstile' : '无'}`);
 
                     if (hasCfInModal && !hasAltchaInModal2) {
@@ -2069,8 +2214,7 @@ async function runMain() {
                     }
 
                     // 【ALTCHA 前置检测】modal text 含 ALTCHA 关键词时，必须先完成 checkbox 才能点 confirm
-                    const hasAltchaInModal = /Protected by ALTCHA/i.test(modalText)
-                        || await modal.locator('altcha-widget, [data-altcha], .altcha').count().catch(() => 0) > 0;
+                    const hasAltchaInModal = hasAltchaInModal2;
                     if (hasAltchaInModal) {
                         console.log('[ALTCHA] Modal 检测到 ALTCHA/checkbox 验证，先完成验证再点 confirm。');
                         const cbCheckedBefore = await isAltchaCheckboxChecked(page, modal);
@@ -2119,8 +2263,36 @@ async function runMain() {
                     await confirmBtn.click();
                     console.log('Confirm Renew clicked.');
 
-                    // 点击后等待响应
-                    await page.waitForTimeout(2000);
+                    // 点击后等待 ALTCHA 0%-100% 验证及站点最终响应。
+                    // 不能在固定 2 秒后把 Verifying... 当成未知状态并刷新页面。
+                    const renewWait = await waitForRenewOutcome(page, oldExpiry);
+                    if (renewWait.state === 'success') {
+                        console.log(`   >> ✅ ${renewWait.message}`);
+                        runStatus = 'success';
+                        renewSuccess = true;
+                        const successPhotoDir = await ensureScreenshotsDir();
+                        await page.screenshot({
+                            path: path.join(successPhotoDir, `renew_success_${attempt}.png`),
+                            fullPage: true
+                        }).catch(() => {});
+                        break;
+                    }
+                    if (renewWait.state === 'not_ready') {
+                        console.log('   >> ⏳ 续期验证完成，但当前尚未到续期时间。');
+                        runStatus = 'not_ready';
+                        blockMessage = renewWait.message;
+                        renewSuccess = false;
+                        await dumpDebugSnapshot(page, `not_ready_after_${attempt}`);
+                        break;
+                    }
+                    if (renewWait.state === 'renew_timeout' || renewWait.state === 'page_unavailable') {
+                        console.log(`   >> ⚠️ 续期验证未能完成: ${renewWait.message}`);
+                        runStatus = 'captcha_required';
+                        blockMessage = renewWait.message;
+                        renewSuccess = false;
+                        await dumpDebugSnapshot(page, `renew_verification_timeout_${attempt}`);
+                        break;
+                    }
 
                     // --- 点击后诊断序列 ---
                     const pageTextAfterClick = await getPageText(page);
@@ -2132,7 +2304,13 @@ async function runMain() {
                     console.log(`[诊断] 点击后页面文本片段: ${pageTextAfterClick.substring(0, 300)}`);
 
                     // 检查 1: not_ready
-                    const notReadyAfter = detectNotReady(pageTextAfterClick);
+                    const renewErrorAfterClick = getRenewErrorFromUrl(currentUrlAfterClick);
+                    if (renewErrorAfterClick) {
+                        console.log(`[诊断] 点击后 renew-error: ${renewErrorAfterClick.substring(0, 300)}`);
+                    }
+                    const notReadyAfter = detectNotReady(
+                        [pageTextAfterClick, renewErrorAfterClick].filter(Boolean).join('\n')
+                    );
                     if (notReadyAfter) {
                         console.log('   >> ⏳ 暂无法续期 (after click)。停止重试。');
                         console.log('   >> 页面提示:', typeof notReadyAfter === 'string' ? notReadyAfter : notReadyAfter.raw);
@@ -2188,47 +2366,42 @@ async function runMain() {
                             if (await confirmBtnAfterCb.isVisible().catch(() => false)) {
                                 await confirmBtnAfterCb.click();
                                 console.log('Confirm Renew clicked (after captcha).');
-                                await page.waitForTimeout(3000);
-
-                                // 再次读取状态
-                                const pageTextFinal = await getPageText(page);
-                                const successFinal = detectRenewSuccess(pageTextFinal);
-                                if (successFinal) {
-                                    console.log('   >> ✅ 续期成功（confirm after captcha）！');
+                                // 二次确认同样会触发 ALTCHA 0%-100% 验证，必须等待最终状态。
+                                const renewWaitAfterCaptcha = await waitForRenewOutcome(page, oldExpiry);
+                                if (renewWaitAfterCaptcha.state === 'success') {
+                                    console.log(`   >> ✅ ${renewWaitAfterCaptcha.message}`);
                                     runStatus = 'success';
                                     renewSuccess = true;
-                                    await page.screenshot({ path: path.join(await ensureScreenshotsDir(), `renew_success_${attempt}.png`), fullPage: true });
+                                    await page.screenshot({
+                                        path: path.join(await ensureScreenshotsDir(), `renew_success_${attempt}.png`),
+                                        fullPage: true
+                                    }).catch(() => {});
+                                    break;
+                                }
+                                if (renewWaitAfterCaptcha.state === 'not_ready') {
+                                    console.log('   >> ⏳ 续期验证完成，但当前尚未到续期时间。');
+                                    runStatus = 'not_ready';
+                                    blockMessage = renewWaitAfterCaptcha.message;
+                                    renewSuccess = false;
+                                    await dumpDebugSnapshot(page, `not_ready_after_captcha_${attempt}`);
                                     break;
                                 }
 
-                                // 检查 modal 是否关闭 + Expiry 是否变化
-                                const stillVisibleFinal = await modal.isVisible({ timeout: 2000 }).catch(() => false);
-                                if (!stillVisibleFinal) {
-                                    await page.waitForTimeout(2000);
-                                    const newExpiryFinal = await readExpiryDate(page);
-                                    console.log(`[Expiry] 二次确认后 Expiry: ${newExpiryFinal || '未读取到'}`);
-                                    if (newExpiryFinal && oldExpiry && newExpiryFinal !== oldExpiry) {
-                                        console.log(`   >> ✅ Expiry 已变化: ${oldExpiry} → ${newExpiryFinal}，续期成功！`);
-                                        runStatus = 'success';
-                                        renewSuccess = true;
-                                        await page.screenshot({ path: path.join(await ensureScreenshotsDir(), `renew_success_${attempt}.png`), fullPage: true });
-                                        break;
-                                    } else if (newExpiryFinal && oldExpiry && newExpiryFinal === oldExpiry) {
-                                        console.log('   >> Modal 已关闭，Expiry 未变，可能已是最新的。');
-                                        runStatus = 'already_renewed';
-                                        renewSuccess = false;
-                                        break;
-                                    } else {
-                                        console.log('   >> Modal 已关闭，但无法读取 Expiry，标记 unknown。');
-                                        renewSuccess = false;
-                                        runStatus = 'unknown';
-                                        break;
-                                    }
-                                }
+                                console.log(`   >> ⚠️ 二次确认后续期验证未能完成: ${renewWaitAfterCaptcha.message}`);
+                                runStatus = 'captcha_required';
+                                blockMessage = renewWaitAfterCaptcha.message;
+                                renewSuccess = false;
+                                await dumpDebugSnapshot(page, `renew_verification_after_captcha_${attempt}`);
+                                break;
                             }
                             // 二次 confirm 按钮不可见 → 重试
                             console.log('   >> Confirm 按钮在 checkbox 点击后不可见，刷新重试。');
-                            await page.reload();
+                            if (!(await safeRenewReload(page, 'checkbox 后重试'))) {
+                                runStatus = 'captcha_required';
+                                blockMessage = 'Renew page was unavailable while retrying after captcha';
+                                renewSuccess = false;
+                                break;
+                            }
                             await page.waitForTimeout(3000);
                             continue;
                         } else {
@@ -2382,7 +2555,12 @@ async function runMain() {
 
                     // 刷新页面重试（这是已知可重试的情况）
                     console.log('   >> 未知状态，刷新重试...');
-                    await page.reload();
+                    if (!(await safeRenewReload(page, '未知状态重试'))) {
+                        runStatus = 'captcha_required';
+                        blockMessage = 'Renew page was unavailable while retrying';
+                        renewSuccess = false;
+                        break;
+                    }
                     await page.waitForTimeout(3000);
                 }
 
