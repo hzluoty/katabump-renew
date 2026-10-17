@@ -171,10 +171,11 @@ function buildFinalSummary(finalCode, finalResult, attempts, maxAttempts = attem
     const accounts = Array.isArray(actionResult.accounts) ? actionResult.accounts : [];
     const counts = {
         success: accounts.filter(account => SUCCESS_STATUSES.includes(account.status)).length,
-        notReady: accounts.filter(account => OK_STATUSES.includes(account.status) && !SUCCESS_STATUSES.includes(account.status)).length,
+        notReady: accounts.filter(account => account.status === 'not_ready').length,
+        noServers: accounts.filter(account => account.status === 'no_servers').length,
         failed: accounts.filter(account => !OK_STATUSES.includes(account.status)).length
     };
-    if (counts.success === 0 && counts.notReady === 0 && counts.failed === 0 && accounts.length === 0) {
+    if (counts.success === 0 && counts.notReady === 0 && counts.noServers === 0 && counts.failed === 0 && accounts.length === 0) {
         counts.failed = 0;
     }
 
@@ -212,6 +213,7 @@ function formatFinalNotification(summary) {
         lines.push(`账号总数：${summary.accounts.length}`);
         lines.push(`成功：${summary.counts.success}`);
         lines.push(`暂不可续期：${summary.counts.notReady}`);
+        if (summary.counts.noServers > 0) lines.push(`无服务器：${summary.counts.noServers}`);
         lines.push(`失败：${summary.counts.failed}`);
     }
     lines.push(`最终状态：${summary.status}`);

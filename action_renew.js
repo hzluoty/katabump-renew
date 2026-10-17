@@ -2127,7 +2127,6 @@ async function runMain() {
                         }
                         runStatus = entry.status;
                         blockMessage = entry.reason;
-                        renewSuccess = false;
                         await dumpDebugSnapshot(page, `${entry.status}_${accountLabel}`);
                         stopCurrentUser = true;
                     }
@@ -2636,7 +2635,9 @@ async function runMain() {
         const userExitCode = getUserExitCode(runStatus);
         overallExitCode = mergeExitCode(overallExitCode, userExitCode);
 
-        if (runStatus === 'error' || runStatus === 'server_entry_not_ready') {
+        // 只保留全局性条件；识别失败/无服务器都是账号级，不连坐其他账号
+        // （它们已经是 FATAL/非 0 退出码，job 该红照样红，只是把账号级结果跑完）
+        if (runStatus === 'error') {
             shouldStopAllUsers = true;
         }
 

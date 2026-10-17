@@ -1,5 +1,6 @@
 const assert = require('assert');
 const { classifyMissingRenew, resolveServerEntry } = require('../lib/server_entry');
+const { OK_STATUSES, STATUS_TITLES } = require('../proxy_runner');
 
 function stubPage({ entries = 0, text = '', renewVisible = false, countThrows = false } = {}) {
     const seeLocator = {
@@ -59,6 +60,14 @@ async function tests() {
     // 统计卡片 "0\nServers"、导航项 "My servers" 不得误判为账号无服务器
     const statCard = stubPage({ entries: 0, text: 'Credits 0 Remaining credits 0\nServers My servers Order Shop' });
     assert.strictEqual((await classifyMissingRenew(statCard)).status, 'server_entry_not_ready');
+
+    // 状态词表的 owner 登记校验：从生产者返回值取名，而不是手抄状态名。
+    // lib/server_entry.js 以后新增终态而忘了在 proxy_runner 登记，这里会直接失败。
+    for (const produced of [emptyResult.status, brokenResult.status]) {
+        assert.ok(STATUS_TITLES[produced], `STATUS_TITLES 缺少终态标题: ${produced}`);
+        const expectedOk = produced === 'no_servers';
+        assert.strictEqual(OK_STATUSES.includes(produced), expectedOk, `${produced} 的 OK 分类错误`);
+    }
 
     console.log('✅ server_entry tests passed');
 }
